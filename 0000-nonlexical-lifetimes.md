@@ -438,7 +438,7 @@ match but not the others (problem case #2).
 However, in order to sucessfully type the full range of examples that
 we would like, we have to go a bit further than just changing
 lifetimes to a portion of the control-flow graph. **We also have to
-take location into account when doing subtyping checks**. This is in
+take program location into account when defining subtyping**. This is in
 contrast to how the compiler works today, where subtyping relations
 are "absolute". That is, in the current compiler, the type `&'a ()` is
 a subtype of the type `&'b ()` whenever `'a` outlives `'b` (`'a: 'b`),
@@ -469,7 +469,7 @@ We describe the design in "layers":
    `#[may_dangle]` attribute introduced by RFC 1327.
 4. Next, we will extend the design to consider named lifetime parameters,
    like those in problem case 3.
-5. Finally, we give a brief description of the borrow checker.
+5. Finally, we give a brief description of the new version of the borrow checker.
 
 ## Layer 0: Definitions
 
@@ -656,7 +656,7 @@ grammar:
 ```
 // A constraint set C:
 C = true
-  | C, (L1: L2) @ P    // Lifetime L1 outlives Lifetime L2 at point P
+  | C, (L1: L2) @ P    // Lifetime L1 will outlive Lifetime L2 from point P
 
 // A lifetime L:
 L = 'a
@@ -711,7 +711,7 @@ that `p` becomes **dead** (not live) in the span before it is
 reassigned.  This is true even though the variable `p` will be used
 again, because the **value** that is in `p` will not be used.
 
-Traditional compiler compute liveness based on variables, but we wish
+Traditional compiler compute liveness based on variables, but as a starting point for our lifetime inference algorithm, we wish
 to compute liveness for **lifetimes**. We can extend a variable-based
 analysis to lifetimes by saying that a lifetime L is live at a point P
 if there is some variable `p` which is live at P, and L appears in the
@@ -812,7 +812,7 @@ borrow and the lifetime `'x` of the original reference. In particular,
 relationship is the same regardless of whether the original reference
 `x` is a shared (`&`) or mutable (`&mut`) reference. However, in more
 complex cases that involve multiple dereferences, the treatment is
-different.
+different. In particular, for any subsequent chain of dereferenced mutable references, it is important that *all* of these references must outlive the borrow; in general, this requires generating multiple reborrow constraints.
 
 **Supporting prefixes.** To define the reborrow constraints, we first
 introduce the idea of supporting prefixes -- this definition will be
@@ -821,7 +821,7 @@ formed by stripping away fields and derefs, except that we stop when
 we reach the deref of a shared reference. Inituitively, shared
 references are different because they are `Copy` -- and hence one
 could always copy the shared reference into a temporary and get an
-equivalent path. Here are some examples of supporting prefixes:
+equivalent path from which to start the remainder of the chain of fields and derefs. In particular, there is no need for the derefs used to obtain the *shared* reference to outlive the resulting borrow. Here are some examples of supporting prefixes:
 
 ```
 let r: (&(i32, i64), (f32, f64));
@@ -1430,8 +1430,7 @@ fn get_default<'r,K,V:Default>(map: &'r mut HashMap<K,V>,
     }                                      // |
 }                                          // v
 ```
-
-When we translate this into MIR, we get something like the following
+The `get_mut` function takes a mutable borrow on `map`; its return value in the `Some(value)` case is also a mutable borrow. When we translate this code into MIR, we get something like the following
 (this is "pseudo-MIR"):
 
 ```
@@ -1466,12 +1465,11 @@ branch to SOME. Otherwise, it should end once we enter the NONE block.
 To accommodate cases like this, we will extend the notion of a region
 so that it includes not only points in the control-flow graph, but
 also includes a (possibly empty) set of "end regions" for various
-named lifetimes.  We denote these as `end('r)` for some named region
-`'r`. The region `end('r)` can be understood semantically as referring
+named lifetimes.  The end region for named lifetime `'r` is denoted `end('r)`. Such an end region can be understood semantically as referring
 to some portion of the caller's control-flow graph (actually, they
 could extend beyond the end of the caller, into the caller's caller,
-and so forth, but that doesn't concern us). This new region might then
-be denoted as the following (in pseudocode form):
+and so forth, but that doesn't concern us). Our extended notion of region might then
+be represented using the following struct (in pseudocode form):
 
 ```rust
 struct Region {
